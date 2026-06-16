@@ -1,44 +1,39 @@
-import os
-from flask import Flask
-from app.config import get_config
-from app.extensions import cors, db, migrate
+from app.extensions import db
 
 
-def create_app():
-    app = Flask(__name__)
-    app.config.from_object(get_config())
-    os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
+class SkillGap(db.Model):
+    """
+    Records skills present in JD but missing/weak in candidate resume.
 
-    # Init extensions
-    cors.init_app(app, resources={r"/api/*": {"origins": "*"}})
-    db.init_app(app)
-    migrate.init_app(app, db)
+    Paper: "The system categorizes gaps by severity based on whether they
+            represent core requirements or preferred qualifications,
+            enabling prioritization of development efforts."
 
-    # Register all models (so Flask-Migrate sees them)
-    with app.app_context():
-        from app.models.user_model              import User
-        from app.models.resume_model            import Resume
-        from app.models.skill_model             import Skill, ResumeSkill
-        from app.models.role_model              import Role, RoleSkill
-        from app.models.skill_gap_model         import SkillGap
-        from app.models.interview_session_model import InterviewSession
-        from app.models.interview_question_model import InterviewQuestion, QuestionKeyword
-        from app.models.interview_response_model import InterviewResponse
-        from app.models.response_evaluation_model import ResponseEvaluation
-        from app.models.feedback_model          import FeedbackReport
-        from app.models.todo_model              import TodoItem
+    gap_type  → 'core' (must-have) or 'preferred' (good-to-have)
+    severity  → 'high' / 'medium' / 'low'  (based on semantic similarity score)
 
-    # Register blueprints
-    from app.routes.resume_routes    import resume_bp
-    from app.routes.analysis_routes  import analysis_bp
-    from app.routes.interview_routes import interview_bp
+    Logic:
+        core     + similarity < 0.3  → severity = high
+        core     + similarity < 0.6  → severity = medium
+        preferred + any similarity   → severity = low
+    """
+    __tablename__ = "skill_gaps"
 
-    app.register_blueprint(resume_bp,    url_prefix="/api/resume")
-    app.register_blueprint(analysis_bp,  url_prefix="/api/analysis")
-    app.register_blueprint(interview_bp, url_prefix="/api/interview")
+    id        = db.Column(db.Integer, primary_key=True)
+    resume_id = db.Column(db.Integer, db.ForeignKey("resumes.id"), nullable=False)
+    skill_id  = db.Column(db.Integer, db.ForeignKey("skills.id"),  nullable=False)
 
-    @app.route("/api/health")
-    def health():
-        return {"status": "ok", "message": "AI Resume Analyzer API is running"}, 200
+    # Paper Problem 1 fix: core vs preferred distinction
+    gap_type  = db.Column(db.Enum("core", "preferred"), default="core", nullable=False)
+    severity  = db.Column(db.Enum("high", "medium", "low"), default="medium", nullable=False)
 
-    return app
+    resume = db.relationship("Resume", back_populates="skill_gaps")
+    skill  = db.relationship("Skill",  back_populates="skill_gaps")
+
+    def to_dict(self):
+        return {
+            "id":       self.id,
+            "skill":    self.skill.skill_name if self.skill else None,
+            "gap_type": self.gap_type,
+            "severity": self.severity,
+        }

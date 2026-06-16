@@ -1,6 +1,11 @@
 from app.extensions import db
 
+
 class Skill(db.Model):
+    """
+    Master skill table — every unique skill stored once.
+    Referenced by ResumeSkill, RoleSkill, and SkillGap.
+    """
     __tablename__ = "skills"
 
     id         = db.Column(db.Integer, primary_key=True)
@@ -16,6 +21,9 @@ class Skill(db.Model):
 
 
 class ResumeSkill(db.Model):
+    """
+    Junction table — which skills does a resume have?
+    """
     __tablename__ = "resume_skills"
 
     id        = db.Column(db.Integer, primary_key=True)
@@ -28,3 +36,8 @@ class ResumeSkill(db.Model):
     __table_args__ = (
         db.UniqueConstraint("resume_id", "skill_id", name="unique_resume_skill"),
     )
+
+    def to_dict(self):
+        return {
+            "skill": self.skill.skill_name if self.skill else None,
+        }

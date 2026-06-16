@@ -1,20 +1,22 @@
 """
 similarity_service.py
 ─────────────────────
-Logic based on research paper:
-  "AI-Based Resume Analyzer and Interview Simulator"
+Paper: "AI-Based Resume Analyzer and Interview Simulator"
 
-Flow:
+Flow (as per paper):
   1. User uploads resume → parser_service extracts skills
-  2. User pastes Job Description
+  2. User pastes Job Description text
   3. THIS SERVICE:
-     a) Extracts required skills FROM the JD using MiniLM
-     b) Computes semantic similarity: resume skills vs JD skills
-     c) Returns match score + matched skills + missing skills + recommendations
+     a) Extracts required skills FROM the JD using MiniLM semantic matching
+     b) Computes overall JD ↔ Resume semantic similarity
+     c) Semantically matches resume skills vs JD skills
+     d) Returns: match score + matched + missing + severity-categorized gaps
+     e) Generates learning resource recommendations
+
+Paper fix: gap_type (core/preferred) categorization added.
+Kaggle dataset removed — paper says JD text itself defines required skills.
 """
 
-import json
-import os
 import re
 import torch
 from sentence_transformers import SentenceTransformer, util
@@ -35,21 +37,6 @@ def _get_model() -> SentenceTransformer:
     return _model
 
 
-# ── Job dataset singleton (only for job title lookup) ────────────────────────
-
-_job_data = None
-
-def _load_dataset():
-    global _job_data
-    if _job_data is not None:
-        return
-    path = os.path.abspath(
-        os.path.join(os.path.dirname(__file__), "..", "data", "job_dataset.json")
-    )
-    with open(path, "r", encoding="utf-8") as f:
-        _job_data = json.load(f)
-
-
 # ══════════════════════════════════════════════════════════════════════════════
 #  MAIN FUNCTION
 # ══════════════════════════════════════════════════════════════════════════════
@@ -61,31 +48,31 @@ def analyze(
     experience_level: str = None,
 ) -> dict:
     """
-    Core analysis as per research paper:
+    Core analysis as per research paper.
 
-    Step 1: Extract skills required from JD text
+    Step 1: Extract skills required from JD text (semantic matching vs vocab)
     Step 2: Compute overall JD ↔ Resume semantic similarity
-    Step 3: Match resume skills against JD-required skills semantically
-    Step 4: Identify matched skills, missing skills, match score
+    Step 3: Match resume skills against JD skills semantically
+    Step 4: Categorize missing skills as core or preferred
     Step 5: Generate recommendations for missing skills
     """
     model = _get_model()
 
-    # ── Step 1: Extract required skills from JD ───────────────────────────────
+    # Step 1: Extract required skills from JD
     jd_skills = _extract_skills_from_jd(jd_text, model)
 
-    # ── Step 2: Overall semantic similarity (JD text vs Resume text) ─────────
+    # Step 2: Overall semantic similarity (JD text vs Resume text)
     jd_emb     = model.encode(jd_text,     convert_to_tensor=True)
     resume_emb = model.encode(resume_text, convert_to_tensor=True)
     overall_sim = round(float(util.cos_sim(jd_emb, resume_emb)[0][0]) * 100, 1)
 
-    # ── Step 3 & 4: Semantic skill matching ───────────────────────────────────
+    # Step 3 & 4: Semantic skill matching with gap categorization
     match_result = _match_skills(resume_skills, jd_skills, model)
 
-    # ── Step 5: Combined score ────────────────────────────────────────────────
+    # Step 5: Combined score
     combined = round((overall_sim + match_result["skill_score"]) / 2, 1)
 
-    # ── Step 6: Recommendations ───────────────────────────────────────────────
+    # Step 6: Recommendations
     recommendations = _build_recommendations(match_result["missing_skills"])
 
     return {
@@ -96,14 +83,16 @@ def analyze(
             "rating":             _rating(combined),
             "interpretation":     _interpretation(combined),
         },
-        "jd_required_skills": sorted(jd_skills),
-        "matched_skills":     match_result["matched"],
-        "missing_skills":     match_result["missing_skills"],
-        "semantic_pairs":     match_result["pairs"],
-        "recommendations":    recommendations,
-        "total_required":     len(jd_skills),
-        "total_matched":      len(match_result["matched"]),
-        "total_missing":      len(match_result["missing_skills"]),
+        "jd_required_skills":   sorted(jd_skills),
+        "matched_skills":        match_result["matched"],
+        "missing_skills":        match_result["missing_skills"],
+        "missing_core_skills":   match_result["missing_core"],
+        "missing_preferred_skills": match_result["missing_preferred"],
+        "semantic_pairs":        match_result["pairs"],
+        "recommendations":       recommendations,
+        "total_required":        len(jd_skills),
+        "total_matched":         len(match_result["matched"]),
+        "total_missing":         len(match_result["missing_skills"]),
     }
 
 
@@ -118,21 +107,6 @@ def jd_resume_score(jd_text: str, resume_text: str) -> dict:
         "rating":           _rating(score),
         "interpretation":   _interpretation(score),
     }
-
-
-def get_all_job_titles() -> list:
-    _load_dataset()
-    seen, result = set(), []
-    for e in _job_data:
-        key = f"{e.get('Title','')}|{e.get('ExperienceLevel','')}"
-        if key not in seen:
-            seen.add(key)
-            result.append({
-                "title":            e.get("Title", ""),
-                "experience_level": e.get("ExperienceLevel", ""),
-                "years":            e.get("YearsOfExperience", ""),
-            })
-    return sorted(result, key=lambda x: x["title"])
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -167,32 +141,36 @@ TECH_SKILLS_VOCAB = [
     "communication", "teamwork", "problem solving", "leadership",
 ]
 
+# Skills considered "core" vs "preferred"
+# Paper: "core requirements or preferred qualifications"
+PREFERRED_SKILLS = {
+    "agile", "scrum", "communication", "teamwork",
+    "leadership", "problem solving", "docker", "kubernetes",
+    "ci/cd", "terraform", "ansible",
+}
+
 
 def _extract_skills_from_jd(jd_text: str, model) -> list:
     """
-    Extract required skills from JD by:
-    1. Encoding each skill in TECH_SKILLS_VOCAB
-    2. Computing similarity with JD text sentences
-    3. Keeping skills that are semantically present in the JD
-
-    This is phrase-vs-phrase comparison (JD sentences vs skill names).
+    Extract required skills from JD by semantic matching
+    against TECH_SKILLS_VOCAB. Threshold = 0.50.
     """
-    # Split JD into sentences/lines for better matching
-    jd_sentences = [s.strip() for s in re.split(r'[\n.•\-\*]+', jd_text) if len(s.strip()) > 5]
+    jd_sentences = [
+        s.strip() for s in re.split(r'[\n.•\-\*]+', jd_text)
+        if len(s.strip()) > 5
+    ]
     if not jd_sentences:
         jd_sentences = [jd_text]
 
-    # Encode JD sentences and skill vocab
     jd_embs    = model.encode(jd_sentences,      convert_to_tensor=True, batch_size=64)
     skill_embs = model.encode(TECH_SKILLS_VOCAB, convert_to_tensor=True, batch_size=64)
 
-    # For each skill, find max similarity across all JD sentences
-    sim_matrix = util.cos_sim(skill_embs, jd_embs)  # (n_skills × n_sentences)
+    sim_matrix = util.cos_sim(skill_embs, jd_embs)
 
     extracted = []
     for i, skill in enumerate(TECH_SKILLS_VOCAB):
         max_score = float(sim_matrix[i].max())
-        if max_score >= 0.50:   # skill is meaningfully present in JD
+        if max_score >= 0.50:
             extracted.append(skill)
 
     return extracted
@@ -206,25 +184,33 @@ def _match_skills(
 ) -> dict:
     """
     Semantically match resume skills vs JD required skills.
-    For each JD skill, find the best matching resume skill.
-    If similarity >= threshold → matched, else → missing.
+    Categorizes missing skills as core or preferred.
+    Paper: "core requirements or preferred qualifications"
     """
     if not jd_skills:
         return {
             "matched": resume_skills, "missing_skills": [],
-            "pairs": [], "skill_score": 100.0
+            "missing_core": [], "missing_preferred": [],
+            "pairs": [], "skill_score": 100.0,
         }
     if not resume_skills:
         return {
-            "matched": [], "missing_skills": jd_skills,
-            "pairs": [], "skill_score": 0.0
+            "matched": [],
+            "missing_skills":    jd_skills,
+            "missing_core":      [s for s in jd_skills if s not in PREFERRED_SKILLS],
+            "missing_preferred": [s for s in jd_skills if s in PREFERRED_SKILLS],
+            "pairs": [], "skill_score": 0.0,
         }
 
     res_embs   = model.encode(resume_skills, convert_to_tensor=True)
     jd_embs    = model.encode(jd_skills,     convert_to_tensor=True)
-    sim_matrix = util.cos_sim(jd_embs, res_embs)  # (n_jd × n_resume)
+    sim_matrix = util.cos_sim(jd_embs, res_embs)
 
-    matched, missing, pairs = [], [], []
+    matched          = []
+    missing_skills   = []
+    missing_core     = []
+    missing_preferred = []
+    pairs            = []
 
     for i, jd_skill in enumerate(jd_skills):
         best_score     = float(sim_matrix[i].max())
@@ -240,15 +226,22 @@ def _match_skills(
                 "type":         "exact" if jd_skill == best_res_skill else "semantic",
             })
         else:
-            missing.append(jd_skill)
+            missing_skills.append(jd_skill)
+            # Paper fix: categorize as core or preferred
+            if jd_skill in PREFERRED_SKILLS:
+                missing_preferred.append(jd_skill)
+            else:
+                missing_core.append(jd_skill)
 
     skill_score = round(len(matched) / len(jd_skills) * 100, 1)
 
     return {
-        "matched":       sorted(matched),
-        "missing_skills": sorted(missing),
-        "pairs":         sorted(pairs, key=lambda x: -x["score"]),
-        "skill_score":   skill_score,
+        "matched":            sorted(matched),
+        "missing_skills":     sorted(missing_skills),
+        "missing_core":       sorted(missing_core),
+        "missing_preferred":  sorted(missing_preferred),
+        "pairs":              sorted(pairs, key=lambda x: -x["score"]),
+        "skill_score":        skill_score,
     }
 
 
@@ -286,13 +279,9 @@ def _build_recommendations(missing_skills: list) -> list:
     for skill in missing_skills:
         url, note = resource_map.get(skill, (
             f"https://www.google.com/search?q=learn+{skill.replace(' ', '+')}+tutorial",
-            "Search for tutorials and courses"
+            "Search for tutorials and courses",
         ))
-        recs.append({
-            "skill":    skill,
-            "resource": url,
-            "note":     note,
-        })
+        recs.append({"skill": skill, "resource": url, "note": note})
     return recs
 
 
