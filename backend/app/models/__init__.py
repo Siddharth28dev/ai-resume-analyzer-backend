@@ -1,39 +1,30 @@
-from app.extensions import db
+# models/__init__.py
+# ------------------
+# Only purpose: make all models importable as a package.
+# create_app() lives in app/__init__.py — NOT here.
+# Flask-Migrate needs all models imported so it can detect tables.
 
+from app.models.user_model                import User
+from app.models.resume_model              import Resume
+from app.models.skill_model               import Skill, ResumeSkill
+from app.models.role_model                import Role, RoleSkill
+from app.models.skill_gap_model           import SkillGap
+from app.models.interview_session_model   import InterviewSession
+from app.models.interview_question_model  import InterviewQuestion, QuestionKeyword
+from app.models.interview_response_model  import InterviewResponse
+from app.models.response_evaluation_model import ResponseEvaluation
+from app.models.feedback_model            import FeedbackReport
+from app.models.todo_model                import TodoItem
 
-class SkillGap(db.Model):
-    """
-    Records skills present in JD but missing/weak in candidate resume.
-
-    Paper: "The system categorizes gaps by severity based on whether they
-            represent core requirements or preferred qualifications,
-            enabling prioritization of development efforts."
-
-    gap_type  → 'core' (must-have) or 'preferred' (good-to-have)
-    severity  → 'high' / 'medium' / 'low'  (based on semantic similarity score)
-
-    Logic:
-        core     + similarity < 0.3  → severity = high
-        core     + similarity < 0.6  → severity = medium
-        preferred + any similarity   → severity = low
-    """
-    __tablename__ = "skill_gaps"
-
-    id        = db.Column(db.Integer, primary_key=True)
-    resume_id = db.Column(db.Integer, db.ForeignKey("resumes.id"), nullable=False)
-    skill_id  = db.Column(db.Integer, db.ForeignKey("skills.id"),  nullable=False)
-
-    # Paper Problem 1 fix: core vs preferred distinction
-    gap_type  = db.Column(db.Enum("core", "preferred"), default="core", nullable=False)
-    severity  = db.Column(db.Enum("high", "medium", "low"), default="medium", nullable=False)
-
-    resume = db.relationship("Resume", back_populates="skill_gaps")
-    skill  = db.relationship("Skill",  back_populates="skill_gaps")
-
-    def to_dict(self):
-        return {
-            "id":       self.id,
-            "skill":    self.skill.skill_name if self.skill else None,
-            "gap_type": self.gap_type,
-            "severity": self.severity,
-        }
+__all__ = [
+    "User", "Resume",
+    "Skill", "ResumeSkill",
+    "Role", "RoleSkill",
+    "SkillGap",
+    "InterviewSession",
+    "InterviewQuestion", "QuestionKeyword",
+    "InterviewResponse",
+    "ResponseEvaluation",
+    "FeedbackReport",
+    "TodoItem",
+]
