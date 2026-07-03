@@ -163,9 +163,10 @@ def _generate_one_question(
         with torch.no_grad():
             outputs = model.generate(
                 **inputs,
-                max_new_tokens       = MAX_TARGET_LEN,
-                num_beams            = num_beams,
-                no_repeat_ngram_size = 3,
+                max_new_tokens       = 64,
+                num_beams            = 4,
+                no_repeat_ngram_size = 4,
+                repetition_penalty   = 1.5,
                 early_stopping       = True,
                 temperature          = 0.8 if _use_finetuned else 1.0,
                 do_sample            = False,
