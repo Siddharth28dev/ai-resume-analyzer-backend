@@ -1,22 +1,58 @@
 """
 evaluation_service.py
 ──────────────────────
-Paper: "Response evaluation employs multiple analytical dimensions:
-        1. Content analysis
-        2. Language quality
-        3. Completeness scoring
-        4. Keyword matching"
+Pipeline (matches paper methodology exactly):
 
-Problem 3 Fix:
-  Previously: Hardcoded knowledge bank for expected answers + keywords.
-  Now:        FLAN-T5 generates expected answer AND keywords dynamically
-              per question, with knowledge bank as fallback only.
+    Interview Question
+          │
+          ▼
+    Generate Expected Answer (LLM)
+          │
+          ▼
+    Generate Keywords (LLM)
+          │
+          ▼
+    Candidate Answer
+          │
+          ▼
+    Evaluate across 4 dimensions
+          ├── Content Analysis
+          ├── Language Quality
+          ├── Completeness
+          └── Keyword Matching
+          │
+          ▼
+    Generate Personalized Feedback
+
+Performance note:
+  Expected-answer generation and keyword generation both use the same
+  FLAN-T5 model as question generation. Calling generate() once per
+  answer (2 calls x N answers) is what caused the axios timeout on
+  /evaluate-all with CPU inference. Instead, this file BATCHES both
+  generation steps: all N questions' expected-answers are produced in a
+  single generate() call, and all N keyword-sets in a second single
+  call - 2 forward passes total regardless of how many questions there
+  are, instead of 2N. The pipeline order and LLM usage are unchanged
+  from the diagram; only *how many times the model is invoked* changed.
 """
 
-import re
+import os
 import torch
 from sentence_transformers import SentenceTransformer, util
 from transformers import T5ForConditionalGeneration, T5Tokenizer
+
+try:
+    from peft import PeftModel
+    _PEFT_AVAILABLE = True
+except ImportError:
+    _PEFT_AVAILABLE = False
+
+FINE_TUNED_MODEL_PATH = os.path.join(
+    os.path.dirname(__file__), "..", "models", "flan_t5_interview"
+)
+BASE_MODEL_NAME = "google/flan-t5-base"
+MAX_INPUT_LEN   = 256
+MAX_TARGET_LEN  = 150
 
 
 # ── Singletons ────────────────────────────────────────────────────────────────
@@ -37,15 +73,30 @@ def _get_minilm() -> SentenceTransformer:
 
 
 def _get_t5():
+    """
+    Loads the same fine-tuned FLAN-T5 + LoRA adapter used for question
+    generation, so expected-answer/keyword generation is grounded in the
+    same model family the paper describes ("LLM fine-tuned on interview
+    question datasets"). Falls back to base flan-t5-base if the adapter
+    isn't found, so evaluation still works even before/without the adapter.
+    """
     global _t5_model, _t5_tokenizer
     if _t5_model is not None:
         return _t5_model, _t5_tokenizer
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"[FLAN-T5] Loading google/flan-t5-base on {device}...")
-    _t5_tokenizer = T5Tokenizer.from_pretrained("google/flan-t5-base")
-    _t5_model     = T5ForConditionalGeneration.from_pretrained(
-        "google/flan-t5-base"
-    ).to(device)
+    _t5_tokenizer = T5Tokenizer.from_pretrained(BASE_MODEL_NAME)
+    base_model = T5ForConditionalGeneration.from_pretrained(BASE_MODEL_NAME)
+
+    adapter_config = os.path.join(FINE_TUNED_MODEL_PATH, "adapter_config.json")
+    if _PEFT_AVAILABLE and os.path.exists(adapter_config):
+        print(f"[FLAN-T5] Loading fine-tuned LoRA adapter from {FINE_TUNED_MODEL_PATH}")
+        _t5_model = PeftModel.from_pretrained(base_model, FINE_TUNED_MODEL_PATH)
+    else:
+        print("[FLAN-T5] Adapter not found - using base flan-t5-base")
+        _t5_model = base_model
+
+    _t5_model = _t5_model.to(device)
     _t5_model.eval()
     print("[FLAN-T5] Ready")
     return _t5_model, _t5_tokenizer
@@ -61,31 +112,49 @@ def evaluate_answer(
     question_type:    str = "technical",
     skill:            str = "",
     job_role:         str = "",
+    expected_answer:  str = None,
+    keywords:         list = None,
 ) -> dict:
-    """Evaluate a single candidate answer against all 4 dimensions."""
+    """
+    Evaluate a single candidate answer against all 4 dimensions.
+
+    `expected_answer` / `keywords` can be passed in pre-generated (used by
+    evaluate_multiple_answers, which batches LLM generation up front). If
+    omitted, they're generated here via a single-item LLM call - fine for
+    one-off calls, just don't loop this for N answers (use
+    evaluate_multiple_answers instead, which batches).
+    """
     if not candidate_answer or len(candidate_answer.strip()) < 10:
         return {
-            "score":           0.0,
-            "rating":          "No Answer",
-            "feedback":        "No answer was provided.",
-            "similarity":      0.0,
-            "expected_answer": "",
-            "keywords_used":   [],
+            "score":            0.0,
+            "rating":           "No Answer",
+            "feedback":         "No answer was provided.",
+            "similarity":       0.0,
+            "expected_answer":  "",
+            "keywords_used":    [],
             "keywords_missing": [],
-            "dimensions":      {},
+            "dimensions":       {},
         }
 
     minilm = _get_minilm()
 
-    # Step 1: Generate expected answer (AI-first, fallback second)
-    expected = _generate_expected_answer(question, question_type, skill, job_role)
+    # Step 1: Generate expected answer (LLM) - unless already batched upstream
+    if expected_answer is None:
+        expected_answer = _generate_expected_answers_batch(
+            [{"question": question, "question_type": question_type,
+              "skill": skill, "job_role": job_role}]
+        )[0]
 
-    # Step 2: AI-generated keywords for this specific question
-    keywords = _generate_keywords_for_question(question, skill, question_type, job_role)
+    # Step 2: Generate keywords (LLM) - unless already batched upstream
+    if keywords is None:
+        keywords = _generate_keywords_batch(
+            [{"question": question, "question_type": question_type,
+              "skill": skill, "job_role": job_role}]
+        )[0]
 
     # Step 3: Encode with MiniLM
-    expected_emb  = minilm.encode(expected,          convert_to_tensor=True)
-    candidate_emb = minilm.encode(candidate_answer,  convert_to_tensor=True)
+    expected_emb  = minilm.encode(expected_answer,  convert_to_tensor=True)
+    candidate_emb = minilm.encode(candidate_answer, convert_to_tensor=True)
 
     # Step 4: Cosine similarity
     similarity = float(util.cos_sim(expected_emb, candidate_emb)[0][0])
@@ -94,11 +163,11 @@ def evaluate_answer(
 
     # Step 5: 4 evaluation dimensions
     dimensions = _evaluate_dimensions(
-        question, candidate_answer, expected,
+        question, candidate_answer, expected_answer,
         similarity, question_type, keywords
     )
 
-    # Step 6: Rating + feedback
+    # Step 6: Rating + personalized feedback
     rating   = _get_rating(similarity)
     feedback = _generate_feedback(rating, dimensions, skill, question_type)
 
@@ -111,7 +180,7 @@ def evaluate_answer(
         "score":            score,
         "similarity":       similarity,
         "rating":           rating,
-        "expected_answer":  expected,
+        "expected_answer":  expected_answer,
         "feedback":         feedback,
         "keywords_used":    keywords_used,
         "keywords_missing": keywords_missing,
@@ -120,17 +189,52 @@ def evaluate_answer(
 
 
 def evaluate_multiple_answers(answers: list) -> dict:
-    """Evaluate multiple question-answer pairs."""
+    """
+    Evaluate multiple question-answer pairs (the /evaluate-all path).
+
+    LLM generation is BATCHED here: all expected-answers are produced in
+    one generate() call, all keyword-sets in a second one - 2 T5 calls
+    total for the whole batch, not 2 per answer. This is what keeps the
+    diagram's "Generate Expected Answer (LLM) -> Generate Keywords (LLM)"
+    steps from timing out on CPU when there are 8-12+ questions.
+    """
+    if not answers:
+        return {
+            "overall_score":      0.0,
+            "overall_rating":     "No Answer",
+            "total_questions":    0,
+            "individual_results": [],
+            "summary":            _overall_summary(0.0, []),
+        }
+
+    meta = [
+        {
+            "question":      item.get("question", ""),
+            "question_type": item.get("question_type", "technical"),
+            "skill":         item.get("skill", ""),
+            "job_role":      item.get("job_role", ""),
+        }
+        for item in answers
+    ]
+
+    # -- Batch Step 1: Generate Expected Answer (LLM) - one call for all N --
+    expected_answers = _generate_expected_answers_batch(meta)
+
+    # -- Batch Step 2: Generate Keywords (LLM) - one call for all N ---------
+    keyword_sets = _generate_keywords_batch(meta)
+
     results     = []
     total_score = 0.0
 
-    for item in answers:
+    for item, expected, kws in zip(answers, expected_answers, keyword_sets):
         result = evaluate_answer(
             question         = item.get("question", ""),
             candidate_answer = item.get("candidate_answer", ""),
             question_type    = item.get("question_type", "technical"),
             skill            = item.get("skill", ""),
             job_role         = item.get("job_role", ""),
+            expected_answer  = expected,
+            keywords         = kws,
         )
         result["question"] = item.get("question", "")
         results.append(result)
@@ -148,149 +252,64 @@ def evaluate_multiple_answers(answers: list) -> dict:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  AI KEYWORD GENERATION (Problem 3 Fix)
+#  LLM GENERATION - EXPECTED ANSWERS (batched)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _generate_keywords_for_question(
-    question:      str,
-    skill:         str,
-    question_type: str,
-    job_role:      str,
-) -> list:
+def _build_answer_prompt(item: dict) -> str:
+    return (
+        f"Provide a comprehensive answer to this {item['question_type']} interview "
+        f"question about {item['skill']} for a {item['job_role']} position. "
+        f"Question: {item['question']}"
+    )
+
+
+def _generate_expected_answers_batch(items: list) -> list:
     """
-    Problem 3 Fix: Generate expected keywords using FLAN-T5.
-    Previously hardcoded — now AI-generated per question.
-    Fallback to knowledge bank if T5 output is too short/empty.
+    One batched generate() call producing an expected answer for every
+    item in `items`. Falls back to the template per-item if the model
+    fails to load or a given output is too short/degenerate.
     """
     try:
         model, tokenizer = _get_t5()
         device = next(model.parameters()).device
 
-        prompt = (
-            f"List 6 key technical terms expected in a good answer to this "
-            f"interview question about {skill} for a {job_role} role. "
-            f"Question: {question} "
-            f"Output only comma-separated terms, nothing else."
-        )
-
+        prompts = [_build_answer_prompt(it) for it in items]
         inputs = tokenizer(
-            prompt,
+            prompts,
             return_tensors="pt",
-            max_length=256,
+            max_length=MAX_INPUT_LEN,
             truncation=True,
+            padding=True,
         ).to(device)
 
         with torch.no_grad():
             outputs = model.generate(
                 **inputs,
-                max_new_tokens=60,
-                num_beams=4,
-                early_stopping=True,
+                max_new_tokens       = MAX_TARGET_LEN,
+                num_beams            = 4,
+                no_repeat_ngram_size = 2,
+                early_stopping       = True,
             )
 
-        generated = tokenizer.decode(outputs[0], skip_special_tokens=True).strip()
+        decoded = tokenizer.batch_decode(outputs, skip_special_tokens=True)
 
-        # Parse comma-separated terms
-        keywords = [k.strip().lower() for k in generated.split(",") if len(k.strip()) > 2]
-
-        # Validate: must have at least 3 meaningful keywords
-        if len(keywords) >= 3:
-            return keywords[:8]   # cap at 8
-
-    except Exception as e:
-        print(f"[FLAN-T5 keyword gen] Failed: {e} — using fallback")
-
-    # Fallback: knowledge bank (used when T5 output is insufficient)
-    return _keyword_fallback(skill, question_type)
-
-
-def _keyword_fallback(skill: str, question_type: str) -> list:
-    """
-    Fallback keyword bank — used only when FLAN-T5 generation fails
-    or produces insufficient output.
-    """
-    KEYWORD_BANK = {
-        "python":           ["functions", "classes", "libraries", "syntax", "interpreter", "pip", "modules"],
-        "flask":            ["routes", "blueprints", "request", "response", "jinja2", "sqlalchemy", "decorator"],
-        "django":           ["models", "views", "templates", "orm", "admin", "urls", "migrations"],
-        "react":            ["components", "hooks", "state", "props", "virtual dom", "jsx", "useeffect"],
-        "docker":           ["container", "image", "dockerfile", "compose", "volume", "network", "registry"],
-        "aws":              ["ec2", "s3", "rds", "lambda", "iam", "cloudwatch", "vpc"],
-        "mysql":            ["tables", "joins", "indexes", "transactions", "foreign key", "query", "acid"],
-        "postgresql":       ["tables", "joins", "indexes", "transactions", "constraints", "query", "acid"],
-        "mongodb":          ["collections", "documents", "bson", "aggregation", "indexes", "schema", "nosql"],
-        "git":              ["commit", "branch", "merge", "pull request", "clone", "push", "rebase"],
-        "machine learning": ["training", "testing", "model", "features", "accuracy", "overfitting", "validation"],
-        "nlp":              ["tokenization", "embeddings", "transformers", "bert", "sentiment", "ner", "corpus"],
-        "rest api":         ["endpoints", "http", "get", "post", "json", "authentication", "status codes"],
-        "kubernetes":       ["pods", "nodes", "deployment", "service", "cluster", "namespace", "ingress"],
-        "javascript":       ["variables", "functions", "async", "promises", "dom", "events", "closures"],
-        "typescript":       ["types", "interfaces", "generics", "decorators", "strict", "compile", "classes"],
-    }
-
-    TYPE_KEYWORDS = {
-        "behavioral":    ["situation", "task", "action", "result", "team", "challenge", "outcome"],
-        "situational":   ["approach", "prioritize", "communicate", "resolve", "plan", "steps", "decision"],
-        "problem_solving": ["debug", "analyze", "root cause", "solution", "test", "reproduce", "fix"],
-    }
-
-    skill_lower = skill.lower()
-    if skill_lower in KEYWORD_BANK:
-        return KEYWORD_BANK[skill_lower]
-    return TYPE_KEYWORDS.get(question_type, ["explain", "example", "implement", "use", "benefit"])
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  EXPECTED ANSWER GENERATION
-# ══════════════════════════════════════════════════════════════════════════════
-
-def _generate_expected_answer(
-    question:      str,
-    question_type: str,
-    skill:         str,
-    job_role:      str,
-) -> str:
-    """
-    Generate reference answer using FLAN-T5.
-    Falls back to template if T5 output is too short.
-    """
-    try:
-        model, tokenizer = _get_t5()
-        device = next(model.parameters()).device
-
-        prompt = (
-            f"Provide a comprehensive answer to this {question_type} interview "
-            f"question about {skill} for a {job_role} position. "
-            f"Question: {question}"
-        )
-
-        inputs = tokenizer(
-            prompt,
-            return_tensors="pt",
-            max_length=300,
-            truncation=True,
-        ).to(device)
-
-        with torch.no_grad():
-            outputs = model.generate(
-                **inputs,
-                max_new_tokens=150,
-                num_beams=4,
-                early_stopping=True,
-                no_repeat_ngram_size=2,
-            )
-
-        generated = tokenizer.decode(outputs[0], skip_special_tokens=True).strip()
-
-        # Use T5 output only if it's substantive (30+ words)
-        if len(generated.split()) >= 30:
-            return generated
+        results = []
+        for text, item in zip(decoded, items):
+            text = text.strip()
+            if len(text.split()) >= 20:
+                results.append(text)
+            else:
+                results.append(_answer_template_fallback(
+                    item["question_type"], item["skill"], item["job_role"]
+                ))
+        return results
 
     except Exception as e:
-        print(f"[FLAN-T5 answer gen] Failed: {e} — using template fallback")
-
-    # Fallback templates
-    return _answer_template_fallback(question_type, skill, job_role)
+        print(f"[FLAN-T5 batch answer gen] Failed: {e} - using template fallback for all")
+        return [
+            _answer_template_fallback(it["question_type"], it["skill"], it["job_role"])
+            for it in items
+        ]
 
 
 def _answer_template_fallback(question_type: str, skill: str, job_role: str) -> str:
@@ -321,52 +340,137 @@ def _answer_template_fallback(question_type: str, skill: str, job_role: str) -> 
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  LLM GENERATION - KEYWORDS (batched)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _build_keyword_prompt(item: dict) -> str:
+    return (
+        f"List 6 key technical terms expected in a good answer to this "
+        f"interview question about {item['skill']} for a {item['job_role']} role. "
+        f"Question: {item['question']} "
+        f"Output only comma-separated terms, nothing else."
+    )
+
+
+def _generate_keywords_batch(items: list) -> list:
+    """
+    One batched generate() call producing a keyword list for every item.
+    Falls back to the knowledge-bank per-item if output is too sparse.
+    """
+    try:
+        model, tokenizer = _get_t5()
+        device = next(model.parameters()).device
+
+        prompts = [_build_keyword_prompt(it) for it in items]
+        inputs = tokenizer(
+            prompts,
+            return_tensors="pt",
+            max_length=MAX_INPUT_LEN,
+            truncation=True,
+            padding=True,
+        ).to(device)
+
+        with torch.no_grad():
+            outputs = model.generate(
+                **inputs,
+                max_new_tokens = 60,
+                num_beams      = 4,
+                early_stopping = True,
+            )
+
+        decoded = tokenizer.batch_decode(outputs, skip_special_tokens=True)
+
+        results = []
+        for text, item in zip(decoded, items):
+            keywords = [k.strip().lower() for k in text.split(",") if len(k.strip()) > 2]
+            if len(keywords) >= 3:
+                results.append(keywords[:8])
+            else:
+                results.append(_keyword_fallback(item["skill"], item["question_type"]))
+        return results
+
+    except Exception as e:
+        print(f"[FLAN-T5 batch keyword gen] Failed: {e} - using knowledge-bank fallback for all")
+        return [
+            _keyword_fallback(it["skill"], it["question_type"])
+            for it in items
+        ]
+
+
+def _keyword_fallback(skill: str, question_type: str) -> list:
+    """Fallback keyword bank - used only when FLAN-T5 output is insufficient."""
+    KEYWORD_BANK = {
+        "python":           ["functions", "classes", "libraries", "syntax", "interpreter", "pip", "modules"],
+        "flask":            ["routes", "blueprints", "request", "response", "jinja2", "sqlalchemy", "decorator"],
+        "django":           ["models", "views", "templates", "orm", "admin", "urls", "migrations"],
+        "react":            ["components", "hooks", "state", "props", "virtual dom", "jsx", "useeffect"],
+        "docker":           ["container", "image", "dockerfile", "compose", "volume", "network", "registry"],
+        "aws":              ["ec2", "s3", "rds", "lambda", "iam", "cloudwatch", "vpc"],
+        "mysql":            ["tables", "joins", "indexes", "transactions", "foreign key", "query", "acid"],
+        "postgresql":       ["tables", "joins", "indexes", "transactions", "constraints", "query", "acid"],
+        "mongodb":          ["collections", "documents", "bson", "aggregation", "indexes", "schema", "nosql"],
+        "git":              ["commit", "branch", "merge", "pull request", "clone", "push", "rebase"],
+        "machine learning": ["training", "testing", "model", "features", "accuracy", "overfitting", "validation"],
+        "nlp":              ["tokenization", "embeddings", "transformers", "bert", "sentiment", "ner", "corpus"],
+        "rest api":         ["endpoints", "http", "get", "post", "json", "authentication", "status codes"],
+        "kubernetes":       ["pods", "nodes", "deployment", "service", "cluster", "namespace", "ingress"],
+        "javascript":       ["variables", "functions", "async", "promises", "dom", "events", "closures"],
+        "typescript":       ["types", "interfaces", "generics", "decorators", "strict", "compile", "classes"],
+    }
+    TYPE_KEYWORDS = {
+        "behavioral":      ["situation", "task", "action", "result", "team", "challenge", "outcome"],
+        "situational":     ["approach", "prioritize", "communicate", "resolve", "plan", "steps", "decision"],
+        "problem_solving": ["debug", "analyze", "root cause", "solution", "test", "reproduce", "fix"],
+    }
+    skill_lower = skill.lower()
+    if skill_lower in KEYWORD_BANK:
+        return KEYWORD_BANK[skill_lower]
+    return TYPE_KEYWORDS.get(question_type, ["explain", "example", "implement", "use", "benefit"])
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  4 EVALUATION DIMENSIONS
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _evaluate_dimensions(
-    question:      str,
+    question:         str,
     candidate_answer: str,
-    expected:      str,
-    similarity:    float,
-    question_type: str,
-    keywords:      list,
+    expected:         str,
+    similarity:       float,
+    question_type:    str,
+    keywords:         list,
 ) -> dict:
     """
-    Paper: 4 dimensions —
-    1. Content relevance
-    2. Completeness
-    3. Language quality
-    4. Keyword coverage (now AI-generated keywords)
+    Paper: 4 dimensions -
+    1. Content analysis
+    2. Language quality
+    3. Completeness
+    4. Keyword matching
     """
     minilm = _get_minilm()
 
-    # 1. Content relevance — answer vs question similarity
+    # 1. Content analysis - answer vs question relevance
     q_emb   = minilm.encode(question,         convert_to_tensor=True)
     ans_emb = minilm.encode(candidate_answer, convert_to_tensor=True)
     content_score = round(float(util.cos_sim(q_emb, ans_emb)[0][0]) * 100, 1)
 
-    # 2. Completeness — word count proxy
+    # 2. Completeness - word count proxy
     word_count = len(candidate_answer.split())
     if word_count >= 80:
-        completeness_label = "Complete"
-        completeness_score = 100
+        completeness_label, completeness_score = "Complete", 100
     elif word_count >= 40:
-        completeness_label = "Adequate"
-        completeness_score = 70
+        completeness_label, completeness_score = "Adequate", 70
     elif word_count >= 15:
-        completeness_label = "Brief"
-        completeness_score = 40
+        completeness_label, completeness_score = "Brief", 40
     else:
-        completeness_label = "Too Short"
-        completeness_score = 10
+        completeness_label, completeness_score = "Too Short", 10
 
-    # 3. Language quality — filler words check
+    # 3. Language quality - filler words check
     filler_words = ["um", "uh", "like", "basically", "literally", "you know", "kind of"]
     filler_count = sum(candidate_answer.lower().count(w) for w in filler_words)
     language_score = max(0, 100 - (filler_count * 10))
 
-    # 4. Keyword coverage — AI-generated keywords
+    # 4. Keyword matching - LLM-generated keywords
     candidate_lower = candidate_answer.lower()
     if keywords:
         hits = [k for k in keywords if k.lower() in candidate_lower]
@@ -388,23 +492,23 @@ def _evaluate_dimensions(
             "description": "Whether the answer is elaborated sufficiently",
         },
         "language_quality": {
-            "score":       language_score,
-            "label":       _score_label(language_score),
+            "score":        language_score,
+            "label":        _score_label(language_score),
             "filler_count": filler_count,
-            "description": "Clarity and professional tone of the answer",
+            "description":  "Clarity and professional tone of the answer",
         },
         "keyword_coverage": {
-            "score":        keyword_score,
-            "label":        _score_label(keyword_score),
-            "keywords_hit": hits,
+            "score":          keyword_score,
+            "label":          _score_label(keyword_score),
+            "keywords_hit":   hits,
             "total_keywords": len(keywords),
-            "description":  "Key concepts from expected answer covered",
+            "description":    "Key concepts from expected answer covered",
         },
     }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  RATING + FEEDBACK
+#  RATING + PERSONALIZED FEEDBACK
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _get_rating(similarity: float) -> str:
@@ -457,8 +561,8 @@ def _generate_feedback(
 
     type_tips = {
         "technical":       "For technical questions, include examples, code concepts, or real use cases.",
-        "behavioral":      "Use the STAR method: Situation → Task → Action → Result.",
-        "situational":     "Structure your answer: identify the issue → list steps → explain outcome.",
+        "behavioral":      "Use the STAR method: Situation -> Task -> Action -> Result.",
+        "situational":     "Structure your answer: identify the issue -> list steps -> explain outcome.",
         "problem_solving": "Walk through your thought process step by step systematically.",
     }
 

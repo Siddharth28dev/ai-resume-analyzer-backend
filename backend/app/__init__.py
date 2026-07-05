@@ -61,5 +61,14 @@ def create_app():
                 "POST /api/bias/transparency",
             ]
         }, 200
+    
+    from sqlalchemy import text
 
+    try:
+       with app.app_context():
+          db.session.execute(text("SELECT 1"))
+          print("Database connection successful!")
+    except Exception as e:
+       print("Database connection failed!")
+       print(e)
     return app
