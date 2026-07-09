@@ -110,6 +110,173 @@ def jd_resume_score(jd_text: str, resume_text: str) -> dict:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  ROLE-BASED ANALYSIS (uses curated Role/RoleSkill DB tables)
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# Paper §3 "Role Mapping and Skill Assessment":
+#   "Job role definitions are constructed from a curated database of position
+#    descriptions... Each role specification enumerates required technical
+#    skills... Skill matching employs semantic similarity scoring."
+# Paper §5 "Target Role Selection":
+#   "Users select their desired job role from a categorized database spanning
+#    multiple industries and seniority levels. The system displays role
+#    requirements and expected competencies."
+#
+# This is the flow that paragraph actually describes: candidate SELECTS a
+# role (not pastes a JD), and matching runs against that role's stored
+# RoleSkill rows (with real core/preferred gap_type from the DB, not a
+# hardcoded PREFERRED_SKILLS guess-list). The JD-paste flow in analyze()
+# above still exists as a secondary/advanced option for ad-hoc job postings
+# that aren't in the curated database yet.
+
+def analyze_by_role(
+    role_skills:   list,   # [{"skill": "python", "gap_type": "core"}, ...] — from RoleSkill table
+    resume_text:   str,
+    resume_skills: list,
+    role_description: str = "",
+    threshold: float = 0.60,
+) -> dict:
+    """
+    Match a candidate's resume against a curated Role's required skills
+    (pulled from the RoleSkill table by the controller), instead of a
+    freeform pasted JD. gap_type (core/preferred) comes directly from the
+    DB — no keyword-list guessing.
+    """
+    model = _get_model()
+
+    role_skill_names = [rs["skill"] for rs in role_skills]
+    gap_type_map      = {rs["skill"]: rs.get("gap_type", "core") for rs in role_skills}
+
+    # Overall similarity: resume vs role description + required skill list
+    # (stands in for "JD text" when there's no pasted JD — same metric the
+    # paper describes, just sourced from the curated role record instead).
+    virtual_jd_text = (role_description or "") + " " + ", ".join(role_skill_names)
+    overall_sim = round(
+        float(util.cos_sim(
+            model.encode(virtual_jd_text, convert_to_tensor=True),
+            model.encode(resume_text,     convert_to_tensor=True),
+        )[0][0]) * 100, 1
+    )
+
+    match_result = _match_skills_against_role(resume_skills, role_skill_names, gap_type_map, model, threshold)
+
+    combined = round((overall_sim + match_result["skill_score"]) / 2, 1)
+    recommendations = _build_recommendations(match_result["missing_skills"])
+
+    return {
+        "scores": {
+            "overall_similarity": overall_sim,
+            "skill_match_score":  match_result["skill_score"],
+            "combined_score":     combined,
+            "rating":             _rating(combined),
+            "interpretation":     _interpretation(combined),
+        },
+        "role_required_skills":     sorted(role_skill_names),
+        "matched_skills":           match_result["matched"],
+        "missing_skills":           match_result["missing_skills"],
+        "missing_core_skills":      match_result["missing_core"],
+        "missing_preferred_skills": match_result["missing_preferred"],
+        "gaps":                     match_result["gaps"],   # includes severity, for SkillGap persistence
+        "semantic_pairs":           match_result["pairs"],
+        "recommendations":          recommendations,
+        "total_required":           len(role_skill_names),
+        "total_matched":            len(match_result["matched"]),
+        "total_missing":            len(match_result["missing_skills"]),
+    }
+
+
+def _severity(gap_type: str, similarity: float) -> str:
+    """
+    Paper: "The system categorizes gaps by severity based on whether they
+    represent core requirements or preferred qualifications."
+    Matches the exact rule documented in skill_gap_model.py:
+        core      + similarity < 0.3  -> high
+        core      + similarity < 0.6  -> medium
+        preferred + any similarity    -> low
+    """
+    if gap_type != "core":
+        return "low"
+    if similarity < 0.3:
+        return "high"
+    return "medium"
+
+
+def _match_skills_against_role(
+    resume_skills:  list,
+    role_skills:    list,
+    gap_type_map:   dict,
+    model,
+    threshold: float = 0.60,
+) -> dict:
+    """Same semantic-matching approach as _match_skills, but gap_type comes
+    from the DB (gap_type_map) instead of a hardcoded keyword set."""
+    if not role_skills:
+        return {
+            "matched": resume_skills, "missing_skills": [],
+            "missing_core": [], "missing_preferred": [],
+            "pairs": [], "gaps": [], "skill_score": 100.0,
+        }
+    if not resume_skills:
+        gaps = [
+            {"skill": s, "gap_type": gap_type_map.get(s, "core"),
+             "severity": _severity(gap_type_map.get(s, "core"), 0.0), "similarity": 0.0}
+            for s in role_skills
+        ]
+        return {
+            "matched": [],
+            "missing_skills":    role_skills,
+            "missing_core":      [s for s in role_skills if gap_type_map.get(s) == "core"],
+            "missing_preferred": [s for s in role_skills if gap_type_map.get(s) == "preferred"],
+            "pairs": [], "gaps": gaps, "skill_score": 0.0,
+        }
+
+    res_embs   = model.encode(resume_skills, convert_to_tensor=True)
+    role_embs  = model.encode(role_skills,   convert_to_tensor=True)
+    sim_matrix = util.cos_sim(role_embs, res_embs)
+
+    matched, missing_skills, missing_core, missing_preferred = [], [], [], []
+    pairs, gaps = [], []
+
+    for i, role_skill in enumerate(role_skills):
+        best_score     = float(sim_matrix[i].max())
+        best_res_idx   = int(sim_matrix[i].argmax())
+        best_res_skill = resume_skills[best_res_idx]
+        gap_type       = gap_type_map.get(role_skill, "core")
+
+        if best_score >= threshold:
+            matched.append(role_skill)
+            pairs.append({
+                "required":     role_skill,
+                "matched_with": best_res_skill,
+                "score":        round(best_score * 100, 1),
+                "type":         "exact" if role_skill == best_res_skill else "semantic",
+            })
+        else:
+            missing_skills.append(role_skill)
+            severity = _severity(gap_type, best_score)
+            gaps.append({
+                "skill": role_skill, "gap_type": gap_type,
+                "severity": severity, "similarity": round(best_score, 4),
+            })
+            if gap_type == "core":
+                missing_core.append(role_skill)
+            else:
+                missing_preferred.append(role_skill)
+
+    skill_score = round(len(matched) / len(role_skills) * 100, 1)
+
+    return {
+        "matched":            sorted(matched),
+        "missing_skills":     sorted(missing_skills),
+        "missing_core":       sorted(missing_core),
+        "missing_preferred":  sorted(missing_preferred),
+        "pairs":              sorted(pairs, key=lambda x: -x["score"]),
+        "gaps":               gaps,
+        "skill_score":        skill_score,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  PRIVATE HELPERS
 # ══════════════════════════════════════════════════════════════════════════════
 

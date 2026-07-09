@@ -47,6 +47,8 @@ def create_app():
             "message": "AI Resume Analyzer API is running",
             "routes": [
                 "POST /api/resume/upload",
+                "GET  /api/analysis/roles",
+                "POST /api/analysis/skill-gap-by-role",
                 "POST /api/analysis/skill-gap",
                 "POST /api/analysis/similarity",
                 "POST /api/interview/generate-questions",
