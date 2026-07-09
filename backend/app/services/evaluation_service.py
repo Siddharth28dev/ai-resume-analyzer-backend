@@ -47,8 +47,12 @@ try:
 except ImportError:
     _PEFT_AVAILABLE = False
 
-FINE_TUNED_MODEL_PATH = os.path.join(
-    os.path.dirname(__file__), "..", "models", "flan_t5_interview"
+# Same env var as question_service.py — keep both services pointed at the
+# same adapter so question generation and answer/keyword generation never
+# drift onto different model versions.
+FINE_TUNED_MODEL_PATH = os.getenv(
+    "FLAN_T5_ADAPTER_DIR",
+    os.path.join(os.path.dirname(__file__), "..", "models", "flan_t5_interview_final_v5"),
 )
 BASE_MODEL_NAME = "google/flan-t5-base"
 MAX_INPUT_LEN   = 256

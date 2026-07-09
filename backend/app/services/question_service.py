@@ -50,8 +50,14 @@ except ImportError:
 # ── Model paths ───────────────────────────────────────────────────────────────
 
 # Fine-tuned LoRA adapter directory (set after training)
-_BASE_DIR    = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-FINETUNED_DIR = os.path.join(_BASE_DIR, "models", "flan_t5_interview")
+# Override with env var FLAN_T5_ADAPTER_DIR if the trained adapter folder
+# name changes (e.g. after retraining a new version) — avoids silent
+# fallback to the base (untrained) model when folder names drift.
+_BASE_DIR     = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+FINETUNED_DIR = os.getenv(
+    "FLAN_T5_ADAPTER_DIR",
+    os.path.join(_BASE_DIR, "models", "flan_t5_interview_final_v5"),
+)
 BASE_MODEL    = "google/flan-t5-base"
 
 # ── Singletons ────────────────────────────────────────────────────────────────

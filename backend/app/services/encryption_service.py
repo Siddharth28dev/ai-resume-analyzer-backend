@@ -69,3 +69,50 @@ def decrypt_if_not_empty(value: str) -> str:
 
 def generate_new_key() -> str:
     return Fernet.generate_key().decode("utf-8")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  BLIND INDEX (deterministic hash for encrypted-column lookups)
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# Fernet encryption is intentionally non-deterministic (random IV per call),
+# so the same plaintext produces different ciphertext every time. That's
+# correct for confidentiality, but it means you CANNOT:
+#   - query WHERE email = <ciphertext>  (never matches on next login)
+#   - enforce UNIQUE on the encrypted column (duplicates go undetected)
+#
+# Fix: alongside the encrypted value, store a deterministic HMAC-SHA256 hash
+# ("blind index") of the normalized plaintext. Same email -> same hash, every
+# time -> safe to index, safe to use in WHERE/UNIQUE. The hash reveals nothing
+# about the plaintext (can't be reversed) but lets you look records up.
+#
+# Uses a SEPARATE key from the Fernet key (ENCRYPTION_KEY), so compromising
+# one doesn't compromise the other. Set HMAC_INDEX_KEY in .env:
+#   python -c "import secrets; print(secrets.token_hex(32))"
+
+import hashlib
+import hmac
+
+
+def _get_hmac_key() -> bytes:
+    key = os.getenv("HMAC_INDEX_KEY")
+    if not key:
+        raise EnvironmentError(
+            "HMAC_INDEX_KEY not set in environment. "
+            "Generate: python -c \"import secrets; print(secrets.token_hex(32))\""
+        )
+    return key.encode("utf-8")
+
+
+def blind_index(value: str) -> str:
+    """
+    Deterministic, non-reversible hash of a normalized value.
+    Use for lookups/uniqueness on encrypted columns (e.g. email).
+    Always normalize (lowercase + strip) before hashing so
+    'User@Mail.com' and 'user@mail.com' resolve to the same index.
+    """
+    if not value:
+        return ""
+    normalized = value.strip().lower()
+    digest = hmac.new(_get_hmac_key(), normalized.encode("utf-8"), hashlib.sha256)
+    return digest.hexdigest()  # 64 hex chars, fixed length
