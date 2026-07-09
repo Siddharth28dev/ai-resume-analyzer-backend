@@ -311,12 +311,10 @@ This project demonstrates practical implementation of:
 
 # 👨‍💻 Author
 
-**Shivam Srivastava**
+**Siddharth Srivastava**
 
 Bachelor of Technology (B.Tech)
 
 Artificial Intelligence | Machine Learning | Full Stack Development | NLP
 
 ---
-
-# ⭐ If you found this project useful, consider giving it a Star.
