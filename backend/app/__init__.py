@@ -1,7 +1,29 @@
 import os
+import threading
 from flask import Flask
 from app.config import get_config
 from app.extensions import cors, db, migrate
+
+
+def _warm_up_models():
+    """
+    Load FLAN-T5 (base model + fine-tuned LoRA adapter) into memory at
+    startup instead of waiting for the first real request to pay the
+    cold-start cost. This is what was causing the frontend's "Evaluation
+    failed: timeout of 60000ms exceeded" error — the first interview
+    request had to both load the model AND generate, blowing past the
+    60s (now increased to 180s, but still: users shouldn't wait on this).
+    Runs in a background thread so /api/health responds immediately.
+    """
+    try:
+        from app.services.question_service import _get_model as _load_question_model
+        from app.services.evaluation_service import _get_t5 as _load_eval_model
+        print("[warm-up] Loading FLAN-T5 models into memory...")
+        _load_question_model()
+        _load_eval_model()
+        print("[warm-up] Models loaded — ready for fast inference.")
+    except Exception as e:
+        print(f"[warm-up] Model warm-up failed (will lazy-load on first request instead): {e}")
 
 
 def create_app():
@@ -73,4 +95,13 @@ def create_app():
     except Exception as e:
        print("Database connection failed!")
        print(e)
+
+    # Warm up FLAN-T5 in the background so the first real interview request
+    # is fast. The WERKZEUG_RUN_MAIN check avoids loading the model twice —
+    # Flask's debug reloader spawns a parent watcher process and a child
+    # worker process; only the child (which actually serves requests) needs
+    # the model loaded.
+    if not app.debug or os.environ.get("WERKZEUG_RUN_MAIN") == "true":
+        threading.Thread(target=_warm_up_models, daemon=True).start()
+
     return app

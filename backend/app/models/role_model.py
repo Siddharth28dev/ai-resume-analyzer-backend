@@ -9,13 +9,17 @@ class Role(db.Model):
     """
     __tablename__ = "roles"
 
-    id               = db.Column(db.Integer, primary_key=True)
-    role_name        = db.Column(db.String(150), unique=True, nullable=False)
-    description      = db.Column(db.Text)
-    industry         = db.Column(db.String(100))
-    experience_level = db.Column(
+    id                     = db.Column(db.Integer, primary_key=True)
+    role_name              = db.Column(db.String(150), unique=True, nullable=False)
+    description            = db.Column(db.Text)
+    industry               = db.Column(db.String(100))
+    experience_level       = db.Column(
         db.Enum("fresher", "mid", "senior"), default="fresher"
     )
+    # Paper: "...enumerates required technical skills, soft skills,
+    # EDUCATIONAL QUALIFICATIONS, and experience levels." — this column was
+    # previously missing entirely; the role spec had no way to express it.
+    education_requirement  = db.Column(db.String(255))
 
     # Relationships
     role_skills        = db.relationship("RoleSkill",        back_populates="role", cascade="all, delete")
@@ -23,11 +27,12 @@ class Role(db.Model):
 
     def to_dict(self):
         return {
-            "id":               self.id,
-            "role_name":        self.role_name,
-            "description":      self.description,
-            "industry":         self.industry,
-            "experience_level": self.experience_level,
+            "id":                    self.id,
+            "role_name":             self.role_name,
+            "description":           self.description,
+            "industry":              self.industry,
+            "experience_level":      self.experience_level,
+            "education_requirement": self.education_requirement,
         }
 
 
