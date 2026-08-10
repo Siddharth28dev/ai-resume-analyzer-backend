@@ -1,4 +1,3 @@
-
 """
 parser_service.py
 ─────────────────
@@ -247,11 +246,18 @@ def _extract_experience(section_text: str, full_text: str) -> dict:
     )
     total_years = float(years_match.group(1)) if years_match else None
  
-    # Find date ranges like "Jan 2022 – Mar 2024" or "2021 - 2023"
-    date_ranges = re.findall(
+    # Find date ranges like "Jan 2022 – Mar 2024", "2021 - 2023",
+    # or "01/2026 – 03/2026" (numeric MM/YYYY — not recognized before).
+    month_name_pattern = (
         r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)?\.?\s*\d{4}"
         r"\s*[-–—to]+\s*"
-        r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)?\.?\s*(?:\d{4}|present|current)",
+        r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)?\.?\s*(?:\d{4}|present|current)"
+    )
+    numeric_mmyyyy_pattern = (
+        r"\d{1,2}/\d{4}\s*[-–—to]+\s*(?:\d{1,2}/\d{4}|present|current)"
+    )
+    date_ranges = re.findall(
+        f"(?:{month_name_pattern}|{numeric_mmyyyy_pattern})",
         text_to_search, re.IGNORECASE
     )
  

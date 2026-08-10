@@ -22,8 +22,13 @@ def normalize_text(text: str) -> str:
 
 
 def extract_email(text: str) -> str | None:
-    match = re.search(r"[\w\.-]+@[\w\.-]+\.\w{2,}", text)
-    return match.group(0).lower() if match else None
+    # \s* around '@' handles a real pdfplumber artifact: an icon glyph
+    # placed right before the email in the PDF sometimes throws off its
+    # spacing calculation, extracting "name @gmail.com" with a stray
+    # space before the @. A plain email has no such space, so this is
+    # safe either way.
+    match = re.search(r"[\w\.-]+\s*@\s*[\w\.-]+\.\w{2,}", text)
+    return match.group(0).replace(" ", "").lower() if match else None
 
 
 def extract_phone(text: str) -> str | None:
@@ -49,6 +54,17 @@ def split_into_sections(text: str) -> dict:
     """
     Heuristically split resume text into labelled sections.
     Returns a dict like: { "education": "...", "skills": "...", ... }
+
+    BUGFIX: header matching used to be "keyword anywhere in the line",
+    which meant a company name like "DataWorks Technologies" or
+    "CloudNext Technologies" — extremely common in Indian resumes —
+    would falsely match the "skills" header keyword "technologies" and
+    truncate the experience section right after the job title, losing
+    the company name, dates, and description. Real section headers are
+    a short line that STARTS WITH the keyword (e.g. "SKILLS",
+    "Technical Skills", "Skills & Tools") — a company name that merely
+    contains the word does not. Matching on startswith instead of
+    substring-anywhere fixes this without missing real headers.
     """
     sections = {key: "" for key in SECTION_HEADERS}
     sections["other"] = ""
@@ -58,9 +74,12 @@ def split_into_sections(text: str) -> dict:
 
     for line in lines:
         lower = line.lower().strip()
+        # Strip leading bullets/numbering ("• Skills", "1. Skills") so
+        # the startswith check still catches those as real headers.
+        lower_for_match = re.sub(r"^[\W_]+", "", lower)
         matched = False
         for section, keywords in SECTION_HEADERS.items():
-            if any(kw in lower for kw in keywords) and len(lower) < 50:
+            if any(lower_for_match.startswith(kw) for kw in keywords) and len(lower) < 50:
                 current_section = section
                 matched = True
                 break

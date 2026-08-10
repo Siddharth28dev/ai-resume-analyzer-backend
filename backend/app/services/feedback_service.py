@@ -85,7 +85,19 @@ def _evaluate_resume_quality(resume_data: dict) -> dict:
     Paper: "Data validation procedures identify potentially missing or
             inconsistent information, flagging areas where candidates
             might strengthen their resumes."
+
+    BUGFIX: resume_data was expected to be the flat dict returned by
+    parser_service.parse_resume() (contact/education/projects at the
+    top level). But the frontend actually sends the full
+    /api/resume/upload response, which nests all of that one level
+    deeper under "parsed_data" — only "skills" and "experience" happen
+    to be duplicated at the top level. That mismatch made contact,
+    education, and projects always read as empty, regardless of what
+    the resume actually contained. Unwrap here so it works whether the
+    caller passes the full upload response or the flat parsed dict.
     """
+    if "parsed_data" in resume_data and "contact" not in resume_data:
+        resume_data = resume_data["parsed_data"]
     strengths  = []
     weaknesses = []
     score      = 0

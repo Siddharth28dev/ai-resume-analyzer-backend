@@ -1,4 +1,5 @@
 from flask import Blueprint, request, jsonify
+from flask_jwt_extended import jwt_required, get_jwt_identity
 from app.controllers.resume_controller import (
     handle_resume_upload,
     handle_get_parsed_text,
@@ -11,16 +12,17 @@ upload_schema = ResumeUploadSchema()
 
 
 @resume_bp.route("/upload", methods=["POST"])
+@jwt_required()
 def upload_resume():
     """
-    POST /api/resume/upload
+    POST /api/resume/upload  (requires Authorization: Bearer <token>)
     Form-data:
         file     : resume file  (pdf | docx | txt)
         job_role : string       (optional)
 
-    Returns parsed resume JSON.
+    Persists a Resume row + ResumeSkill rows tied to the logged-in user,
+    then returns the parsed resume JSON plus resume_id.
     """
-    # Validate form fields
     try:
         form_data = upload_schema.load(request.form)
     except ValidationError as err:
@@ -28,8 +30,9 @@ def upload_resume():
 
     file     = request.files.get("file")
     job_role = form_data.get("job_role")
+    user_id  = int(get_jwt_identity())
 
-    result, status = handle_resume_upload(file, job_role)
+    result, status = handle_resume_upload(file, job_role, user_id)
     return jsonify(result), status
 
 
@@ -37,7 +40,7 @@ def upload_resume():
 def extract_text():
     """
     POST /api/resume/extract-text
-    Returns only the cleaned raw text (debug endpoint).
+    Returns only the cleaned raw text (debug endpoint, no persistence).
     """
     file     = request.files.get("file")
     job_role = request.form.get("job_role")

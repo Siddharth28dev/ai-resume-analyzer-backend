@@ -2,7 +2,7 @@ import os
 import threading
 from flask import Flask
 from app.config import get_config
-from app.extensions import cors, db, migrate
+from app.extensions import cors, db, migrate, jwt
 
 
 def _warm_up_models():
@@ -34,6 +34,7 @@ def create_app():
     cors.init_app(app, resources={r"/api/*": {"origins": "*"}})
     db.init_app(app)
     migrate.init_app(app, db)
+    jwt.init_app(app)
 
     with app.app_context():
         from app.models import (               # noqa: F401
@@ -50,12 +51,14 @@ def create_app():
         )
 
     # Blueprints
-    from app.routes.resume_routes   import resume_bp
-    from app.routes.analysis_routes import analysis_bp
+    from app.routes.auth_routes      import auth_bp
+    from app.routes.resume_routes    import resume_bp
+    from app.routes.analysis_routes  import analysis_bp
     from app.routes.interview_routes import interview_bp
     from app.routes.feedback_routes  import feedback_bp
     from app.routes.bias_routes      import bias_bp
 
+    app.register_blueprint(auth_bp,      url_prefix="/api/auth")
     app.register_blueprint(resume_bp,    url_prefix="/api/resume")
     app.register_blueprint(analysis_bp,  url_prefix="/api/analysis")
     app.register_blueprint(interview_bp, url_prefix="/api/interview")
@@ -68,6 +71,9 @@ def create_app():
             "status":  "ok",
             "message": "AI Resume Analyzer API is running",
             "routes": [
+                "POST /api/auth/register",
+                "POST /api/auth/login",
+                "GET  /api/auth/me",
                 "POST /api/resume/upload",
                 "GET  /api/analysis/roles",
                 "POST /api/analysis/skill-gap-by-role",

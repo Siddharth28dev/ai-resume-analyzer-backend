@@ -1,4 +1,3 @@
-
 # ──────────────────────────────────────────────
 #  SKILLS DATABASE
 # ──────────────────────────────────────────────
@@ -106,8 +105,8 @@ SECTION_HEADERS = {
     "education":    ["education", "academic", "qualification", "degree"],
     "experience":   ["experience", "work history", "employment", "internship"],
     "skills":       ["skills", "technical skills", "technologies", "competencies"],
-    # "projects":     ["projects", "personal projects", "academic projects"],
-    # "certifications": ["certifications", "certificates", "courses", "training"],
+    "projects":     ["projects", "personal projects", "academic projects"],
+    "certifications": ["certifications", "certificates", "courses", "training"],
     # "summary":      ["summary", "objective", "about me", "profile"],
     "contact":      ["contact", "email", "phone", "address", "linkedin", "github"],
 }
