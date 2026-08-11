@@ -12,6 +12,35 @@ const axiosClient = axios.create({
   headers: { "Content-Type": "application/json" },
 });
 
+// Attach the JWT (if we have one) to every outgoing request. This is what
+// was missing entirely before — the backend now requires a token on
+// resume/interview/feedback routes, and this is the only place it gets
+// attached, so every page just calls the exported functions below and
+// doesn't need to think about auth headers itself.
+axiosClient.interceptors.request.use((config) => {
+  const token = localStorage.getItem("auth_token");
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`;
+  }
+  return config;
+});
+
+// If the token is missing/expired, the backend returns 401 — bounce back
+// to login instead of leaving the user stuck on a silently-failing page.
+axiosClient.interceptors.response.use(
+  (res) => res,
+  (err) => {
+    if (err?.response?.status === 401) {
+      localStorage.removeItem("auth_token");
+      localStorage.removeItem("auth_user");
+      // No router in this app — a full reload re-mounts App, which reads
+      // localStorage on mount and falls back to the login screen itself.
+      window.location.reload();
+    }
+    return Promise.reject(err);
+  }
+);
+
 // AI-generation-heavy calls (question generation, answer evaluation) run
 // FLAN-T5 on CPU. Cold-start (first call after server start/reload) has to
 // load the base model + LoRA adapter into memory before it can generate
@@ -20,6 +49,16 @@ const axiosClient = axios.create({
 // default stays for everything else so real connectivity failures still
 // surface quickly instead of hanging for 3 minutes.
 const AI_GENERATION_TIMEOUT_MS = 180000; // 3 min
+
+// ── Auth APIs ─────────────────────────────────────────────────────────────────
+export const registerUser = (data) =>
+  axiosClient.post("/auth/register", data);
+
+export const loginUser = (data) =>
+  axiosClient.post("/auth/login", data);
+
+export const getCurrentUser = () =>
+  axiosClient.get("/auth/me");
 
 // ── Resume APIs ───────────────────────────────────────────────────────────────
 export const uploadResume = (formData) =>
@@ -49,8 +88,11 @@ export const generateFeedback = (data) =>
 export const generateTodo = (data) =>
   axiosClient.post("/feedback/todo", data);
 
-export const deleteAccount = (userId) =>
-  axiosClient.delete("/feedback/delete-account", { data: { user_id: userId } });
+// Deletes whichever account the JWT belongs to — the backend no longer
+// trusts a user_id passed here (that used to let anyone delete anyone
+// else's account by guessing an ID).
+export const deleteAccount = () =>
+  axiosClient.delete("/feedback/delete-account");
 
 // ── Bias APIs ─────────────────────────────────────────────────────────────────
 export const auditJD = (jdText) =>

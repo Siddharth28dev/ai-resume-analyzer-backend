@@ -10,7 +10,7 @@ import "./pages.css";
 
 export default function Feedback() {
   const {
-    resumeData, skillGapData, interviewData,
+    resumeData, skillGapData, interviewData, sessionId,
     selectedRole, setFeedbackData, setTodoList, setCurrentStage,
   } = useApp();
 
@@ -27,6 +27,7 @@ export default function Feedback() {
           skill_gap_data: skillGapData,
           interview_data: interviewData,
           job_role:       selectedRole,
+          session_id:     sessionId,
         });
         if (res.data.success) {
           setFeedback(res.data.feedback);

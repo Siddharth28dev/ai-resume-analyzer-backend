@@ -9,7 +9,7 @@ import { uploadResume } from "../api/axiosClient";
 import "./pages.css";
 
 export default function ResumeUpload() {
-  const { setResumeData, setResumeFile, setCurrentStage } = useApp();
+  const { setResumeData, setResumeFile, setResumeId, setCurrentStage } = useApp();
 
   const [file,    setFile]    = useState(null);
   const [loading, setLoading] = useState(false);
@@ -39,12 +39,13 @@ export default function ResumeUpload() {
       if (res.data.success) {
         setResumeData(res.data);
         setResumeFile(file);
+        setResumeId(res.data.resume_id || null);
         setCurrentStage(2);
       } else {
         setError(res.data.error || "Upload failed.");
       }
     } catch (e) {
-      setError("Server error. Make sure backend is running.");
+      setError(e?.response?.data?.error || "Server error. Make sure backend is running.");
     } finally {
       setLoading(false);
     }

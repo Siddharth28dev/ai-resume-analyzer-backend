@@ -1,13 +1,23 @@
 // App.jsx
 // Paper: "5-stage workflow guides candidates through career preparation"
 
+import { useState } from "react";
 import { AppProvider, useApp } from "./context/AppContext";
-import ResumeUpload  from "./pages/ResumeUpload";
-import RoleSelection from "./pages/RoleSelection";
-import Interview     from "./pages/Interview";
-import Feedback      from "./pages/Feedback";
-import TodoList      from "./pages/TodoList";
-import StageBar      from "./components/StageBar";
+import Login          from "./pages/Login";
+import Register       from "./pages/Register";
+import ResumeUpload   from "./pages/ResumeUpload";
+import RoleSelection  from "./pages/RoleSelection";
+import Interview      from "./pages/Interview";
+import Feedback       from "./pages/Feedback";
+import TodoList       from "./pages/TodoList";
+import StageBar       from "./components/StageBar";
+
+function AuthGate() {
+  const [mode, setMode] = useState("login"); // "login" | "register"
+  return mode === "login"
+    ? <Login onSwitchToRegister={() => setMode("register")} />
+    : <Register onSwitchToLogin={() => setMode("login")} />;
+}
 
 function WorkflowRouter() {
   const { currentStage } = useApp();
@@ -23,11 +33,29 @@ function WorkflowRouter() {
   );
 }
 
+function Root() {
+  const { token, user, logout } = useApp();
+
+  if (!token || !user) {
+    return <AuthGate />;
+  }
+
+  return (
+    <>
+      <div className="topbar">
+        <span>Signed in as {user.name}</span>
+        <button className="link-btn" onClick={logout}>Log out</button>
+      </div>
+      <WorkflowRouter />
+    </>
+  );
+}
+
 export default function App() {
   return (
     <AppProvider>
       <div className="app">
-        <WorkflowRouter />
+        <Root />
       </div>
     </AppProvider>
   );

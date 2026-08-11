@@ -10,8 +10,8 @@ const TIME_LIMIT = 120;
 
 export default function Interview() {
   const {
-    resumeData, selectedRole, skillGapData,
-    setQuestions, setAnswers, setInterviewData, setCurrentStage,
+    resumeData, resumeId, selectedRole, skillGapData, sessionId,
+    setQuestions, setAnswers, setInterviewData, setSessionId, setCurrentStage,
   } = useApp();
 
   const [questions,   setLocalQuestions] = useState([]);
@@ -40,6 +40,7 @@ export default function Interview() {
     for (const type of ["technical", "problem_solving", "behavioral", "situational"]) {
       for (const item of (obj[type] || [])) {
         flat.push({
+          id:         item.id        || null,
           question:   item.question   || "",
           type:       item.type       || type,
           skill:      item.skill      || "",
@@ -55,7 +56,7 @@ export default function Interview() {
   const submitAll = useCallback(async (allAnswers) => {
     setSubmitting(true);
     try {
-      const res = await evaluateAllAnswers({ answers: allAnswers });
+      const res = await evaluateAllAnswers({ answers: allAnswers, session_id: sessionId });
       if (res.data) {
         setAnswers(allAnswers);
         setInterviewData(res.data);
@@ -68,7 +69,7 @@ export default function Interview() {
       setError("Evaluation failed: " + (e?.response?.data?.error || e.message));
       setSubmitting(false);
     }
-  }, [setAnswers, setInterviewData, setCurrentStage]);
+  }, [setAnswers, setInterviewData, setCurrentStage, sessionId]);
 
   // Move to next question or submit — uses refs to avoid stale state
   const handleNext = useCallback((timedOut = false) => {
@@ -80,6 +81,7 @@ export default function Interview() {
 
     // Build new answer entry
     const newAnswer = {
+      question_id:      qs[idx]?.id     || null,
       question:         qs[idx]?.question || "",
       candidate_answer: ans,
       question_type:    qs[idx]?.type     || "technical",
@@ -140,6 +142,7 @@ export default function Interview() {
         const res = await generateQuestions({
           job_role:           selectedRole            || "Software Developer",
           resume_text:        resumeData?.parsed_text || "",
+          resume_id:          resumeId,
           skill_gaps:         skillGapData?.missing_skills  || [],
           matched_skills:     skillGapData?.matched_skills  || [],
           experience_level:   resumeData?.experience?.level || "fresher",
@@ -155,6 +158,7 @@ export default function Interview() {
           questionsRef.current = flat;
           setLocalQuestions(flat);
           setQuestions(flat);
+          setSessionId(res.data?.data?.session_id || null);
           startTimer();
         } else {
           setError(res.data?.error || "Failed to generate questions.");

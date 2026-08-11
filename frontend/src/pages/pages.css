@@ -192,3 +192,23 @@ body {
   .overall-score   { flex-direction: column; align-items: flex-start; }
   .score-row span:first-child { min-width: 140px; }
 }
+/* Added for auth (Login/Register/App topbar) */
+.link-btn {
+  background: none;
+  border: none;
+  color: #4f46e5;
+  cursor: pointer;
+  font-weight: 600;
+  padding: 0;
+  text-decoration: underline;
+}
+
+.topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 24px;
+  background: #f8fafc;
+  border-bottom: 1px solid #e5e7eb;
+  font-size: 14px;
+}
