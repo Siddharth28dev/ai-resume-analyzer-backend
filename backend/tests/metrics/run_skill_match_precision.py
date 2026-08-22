@@ -65,10 +65,17 @@ def run():
         result = analyze(JD_TEXT, cleaned, resume_skills)
 
         for pair in result["semantic_pairs"]:
+            # BUGFIX: similarity_service.analyze()'s semantic_pairs entries
+            # are keyed "required" (the JD skill) and "matched_with" (the
+            # resume skill it matched against) — see _match_skills() in
+            # similarity_service.py. This was reading "jd_skill"/
+            # "resume_skill", which don't exist on that dict, so every row
+            # silently wrote empty strings for both columns and the CSV
+            # was unreviewable no matter how carefully you filled it in.
             rows.append({
                 "resume": filename,
-                "jd_skill": pair.get("jd_skill", ""),
-                "matched_resume_skill": pair.get("resume_skill", ""),
+                "jd_skill": pair.get("required", ""),
+                "matched_resume_skill": pair.get("matched_with", ""),
                 "similarity_score": pair.get("score", ""),
                 "correct": "",  # <-- you fill this in: y / n
             })

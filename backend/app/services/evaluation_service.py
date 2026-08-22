@@ -41,6 +41,12 @@ import torch
 from sentence_transformers import SentenceTransformer, util
 from transformers import T5ForConditionalGeneration, T5Tokenizer
 
+# See question_service.py for the full explanation — peft checks
+# hasattr(torch.distributed, "tensor") without importing it first, which
+# fails on torch versions where that submodule is lazy. This import is
+# what makes the check pass; it's a no-op otherwise for CPU inference.
+import torch.distributed.tensor  # noqa: F401
+
 try:
     from peft import PeftModel
     _PEFT_AVAILABLE = True

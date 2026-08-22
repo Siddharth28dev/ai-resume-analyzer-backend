@@ -109,3 +109,26 @@ def _extract_docx(filepath: str) -> str:
 def _extract_txt(filepath: str) -> str:
     with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
         return f.read()
+
+
+def delete_upload(filepath: str) -> None:
+    """
+    Remove an uploaded file from disk once it's no longer needed.
+
+    encryption_service.py documents the intended data-handling strategy as
+    "Files -> UUID filename + deleted after parse" — this is the function
+    that actually makes that true. Every caller of save_upload() must call
+    this once extract_text_from_file() has been attempted (success or
+    failure — a file that fails to parse still shouldn't be left behind),
+    normally from a try/finally so cleanup happens even if a later step
+    raises. Missing/already-removed files are treated as a no-op, not an
+    error, since a controller may legitimately call this after an earlier
+    failure already cleaned up.
+    """
+    try:
+        if filepath and os.path.exists(filepath):
+            os.remove(filepath)
+    except OSError as e:
+        # Don't let a cleanup failure break the request — the candidate
+        # already has their result. Just make it visible in logs.
+        print(f"[file_handler] WARNING: failed to delete upload {filepath}: {e}")
